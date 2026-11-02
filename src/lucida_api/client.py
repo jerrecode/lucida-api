@@ -4,6 +4,7 @@ import asyncio
 import math
 import os
 import re
+import time
 import struct
 import uuid
 import wave
@@ -12,8 +13,8 @@ from collections.abc import Callable
 import httpx
 from .config import Config
 from .models import (API_VERSION, SCHEMA_VERSION, CapabilityUnavailable,
-                     FileConflict, Job, JobState, TransferError)
-from .providers import DirectMediaProvider, ProviderRegistry, SampleProvider
+                     FileConflict, Job, JobState, TrackInfo, TransferError)
+from .providers import DirectMediaProvider, MusicBrainzProvider, ProviderRegistry, SampleProvider
 from .security import check_source
 from .storage import JobStore
 
@@ -36,6 +37,9 @@ class LucidaClient:
         self.registry = ProviderRegistry()
         self.registry.register(SampleProvider())
         self.registry.register(DirectMediaProvider())
+        self.registry.register(MusicBrainzProvider())
+        self._search_lock = asyncio.Lock()
+        self._last_search_at = 0.0
         self._limit = asyncio.Semaphore(self.config.max_concurrent)
 
     def version(self) -> dict[str, str | int]:
@@ -46,6 +50,55 @@ class LucidaClient:
 
     def jobs(self, limit: int = 100) -> list[Job]:
         return self.store.list(limit)
+
+    async def search(self, query: str, limit: int = 10,
+                     transport: httpx.AsyncBaseTransport | None = None) -> list[TrackInfo]:
+        """Search MusicBrainz recording metadata, never audio/download links.
+
+        The optional transport is for deterministic integration testing.
+        Rate limiting is per client, not global across independent processes.
+        """
+        if not query.strip() or len(query) > 256 or not 1 <= limit <= 20:
+            raise ValueError("Search requires 1..256 query chars and 1..20 results")
+        async with self._search_lock:
+            gap = time.monotonic() - self._last_search_at
+            if gap < 1.1:
+                await asyncio.sleep(1.1 - gap)
+            self._last_search_at = time.monotonic()
+        try:
+            async with httpx.AsyncClient(
+                transport=transport, timeout=self.config.timeout_seconds,
+                follow_redirects=False, trust_env=False,
+                headers={"User-Agent": "LucidaCore/0.1.0 (https://github.com/jerrecode/lucida-api)",
+                         "Accept": "application/json"},
+            ) as http:
+                response = await http.get("https://musicbrainz.org/ws/2/recording/",
+                                          params={"query": query, "fmt": "json", "limit": limit})
+                if response.status_code != 200:
+                    raise CapabilityUnavailable(f"MusicBrainz search unavailable (HTTP {response.status_code})")
+                if len(response.content) > 2_000_000:
+                    raise TransferError("Metadata response too large")
+                payload = response.json()
+                recordings = payload.get("recordings", []) if isinstance(payload, dict) else []
+                if not isinstance(recordings, list):
+                    raise TransferError("Invalid metadata response")
+                results = []
+                for record in recordings[:limit]:
+                    if not isinstance(record, dict) or not isinstance(record.get("id"), str):
+                        continue
+                    credits = record.get("artist-credit", [])
+                    artist = "".join(
+                        item.get("name", "") if isinstance(item, dict) else item
+                        for item in credits if isinstance(item, (dict, str))) if isinstance(credits, list) else ""
+                    results.append(TrackInfo(id=record["id"], title=str(record.get("title", "")),
+                        artist=artist, provider="musicbrainz",
+                        duration_ms=record.get("length") if isinstance(record.get("length"), int) else None,
+                        score=record.get("score") if isinstance(record.get("score"), int) else None))
+                return results
+        except httpx.HTTPError as exc:
+            raise CapabilityUnavailable(f"MusicBrainz request failed: {exc}") from exc
+        except (ValueError, TypeError) as exc:
+            raise TransferError("Unable to parse MusicBrainz metadata") from exc
 
     async def acquire(self, source: str, filename: str | None = None,
                       progress: ProgressCallback | None = None) -> Job:

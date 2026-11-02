@@ -34,3 +34,10 @@ class ProviderRegistry:
 
     def resolve(self, source: str) -> Provider | None:
         return next((p for p in self._providers if p.accepts(source)), None)
+
+
+class MusicBrainzProvider:
+    capabilities = ProviderCapabilities("musicbrainz", search=True, metadata=True,
+                                        acquisition=False, notes="Public metadata only; never an audio source")
+    def accepts(self, source: str) -> bool:
+        return False

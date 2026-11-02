@@ -27,6 +27,16 @@ def create_app(client: LucidaClient | None = None):
     def providers():
         return backend.providers()
 
+    @app.get("/v1/search")
+    async def search(q: str, limit: int = 10):
+        from .models import LucidaError
+        if not q.strip() or len(q) > 256 or not 1 <= limit <= 20:
+            raise HTTPException(400, "Invalid search query or result limit")
+        try:
+            return [item.to_dict() for item in await backend.search(q, limit)]
+        except LucidaError as exc:
+            raise HTTPException(503, detail={"code": exc.code, "message": str(exc)}) from exc
+
     @app.get("/v1/jobs")
     def jobs(limit: int = 100):
         if limit < 1 or limit > 1000:

@@ -40,6 +40,19 @@ class Job:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+@dataclass(frozen=True, slots=True)
+class TrackInfo:
+    id: str
+    title: str
+    artist: str
+    provider: str
+    duration_ms: int | None = None
+    score: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class LucidaError(Exception):
     code = "lucida_error"
 

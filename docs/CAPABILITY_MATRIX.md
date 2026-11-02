@@ -7,6 +7,7 @@ Legend: V = verified locally, R = described in reference implementation but not 
 | Offline sample WAV | Current own test fixture | API | Verified Required | V: WAV decoded by stdlib wave |
 | Direct trusted HTTP(S) audio | Own implemented provider | API | Useful Extension | V: local HTTP server binary check; public remote unverified |
 | Persistent transfer journal | Own SQLite store | API | Verified Required | V: reopen state and interrupted marker |
+| MusicBrainz metadata search | Official MusicBrainz API documentation | API / CLI / GUI | Useful Extension | V: HTTP mock contract; live service not tested; never audio acquisition |
 | Public Python SDK | Own source and imports | API | Verified Required | V: client import and tests |
 | FastAPI local service | Own ASGI integration tests | API | Useful Extension | V: /v1/version/providers/jobs through in-process HTTP adapter; network socket deployment unverified |
 | CLI JSON and demo | Own CLI tests | CLI | Verified Required | V: output, error, completion and history |

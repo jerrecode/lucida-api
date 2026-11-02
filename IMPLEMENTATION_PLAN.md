@@ -15,7 +15,7 @@
   - [ ] Verify built wheels and install/update/uninstall in clean VMs
 - [ ] Phase 3: API [API; P0]
   - [x] Domain contracts, version and errors
-  - [x] Capability registry and offline sample provider
+  - [x] Capability registry, offline sample provider and MusicBrainz metadata-only search
   - [x] Configuration and app storage paths
   - [x] SQLite journal and interrupted job recovery marker
   - [x] Controlled HTTP test transfer with length and MIME verification
@@ -32,11 +32,11 @@
   - [ ] Album/playlist import and tested ordering
   - [ ] Optional FFmpeg conversion + verification
 - [ ] Phase 6: CLI [CLI; P0]
-  - [x] Version, doctor, providers, offline demo, direct download, JSON jobs
+  - [x] Version, doctor, providers, MusicBrainz search, offline demo, direct download, JSON jobs
   - [ ] Batch queues, pause, cancel, retry and interactive TUI
   - [ ] Linux and Windows real terminal validation
 - [ ] Phase 7: GUI [GUI; P0]
-  - [x] Qt downloads interface, test provider, asynchronous worker and journal view
+  - [x] Qt downloads interface, metadata search, test provider, asynchronous workers and journal view
   - [ ] Provider search, artwork, retry, cancel, adaptive settings and model-view virtual queue
   - [ ] Test actual GUI on Linux and Windows screens / accessibility tooling
 - [ ] Phase 8: Installation [all; P0]
