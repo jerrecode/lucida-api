@@ -1,6 +1,6 @@
 # Hierarchical implementation plan (2026-11-02)
 
-**Completion rule:** a parent checkbox is completed only if all mandatory descendants are verified. Repository status: development preview, NOT release ready. Code and tests in the first vertical slice are locally verified under Python 3.13; CI and real Windows testing pending.
+**Completion rule:** a parent checkbox is completed only if all mandatory descendants are verified. Repository status: development preview, NOT release ready. Code and tests in the first vertical slice are locally verified under Python 3.13; all twelve Ubuntu and Windows CI jobs passed, including Qt offscreen launch. Real desktop and installer testing remain pending.
 
 - [ ] Phase 1: Discovery and architecture [API; P0]
   - [x] Inspect all three initial repositories (empty via GitHub API)
@@ -11,8 +11,9 @@
 - [ ] Phase 2: Foundations [all; P0]
   - [x] Establish three independent Python packages and declared dependency direction
   - [x] Add per-project tests and Linux/Windows GitHub Actions definitions
-  - [ ] Verify CI results on GitHub Windows and Ubuntu runners
-  - [ ] Verify built wheels and install/update/uninstall in clean VMs
+  - [x] Verify 2026-11-02 CI results on GitHub Windows and Ubuntu runners (12/12 jobs)
+  - [x] Verify all three wheel builds on Ubuntu and Windows CI runners
+  - [ ] Verify installers, updates and uninstallation in clean VMs
 - [ ] Phase 3: API [API; P0]
   - [x] Domain contracts, version and errors
   - [x] Capability registry, offline sample provider and MusicBrainz metadata-only search
