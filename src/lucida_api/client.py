@@ -111,6 +111,8 @@ class LucidaClient:
                                     report(JobState.RUNNING)
                                 await asyncio.to_thread(file.flush)
                                 await asyncio.to_thread(os.fsync, file.fileno())
+                            if transferred == 0:
+                                raise TransferError("Empty download is not a usable audio file")
                             if total is not None and total != transferred:
                                 raise TransferError("Truncated transfer; length mismatch")
                 # Hard-link publication creates destination only if absent: no silent overwrite.
@@ -122,6 +124,8 @@ class LucidaClient:
                 raise
             except Exception as exc:
                 report(JobState.FAILED, f"{type(exc).__name__}: {exc}")
+                if isinstance(exc, httpx.HTTPError):
+                    raise TransferError(f"Network transfer failed: {exc}") from exc
                 raise
             finally:
                 # Failed partial files remain for inspection, never confused with completed outputs.

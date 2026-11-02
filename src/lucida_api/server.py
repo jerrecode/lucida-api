@@ -2,14 +2,22 @@
 from __future__ import annotations
 import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from .client import LucidaClient
 
 
 def create_app(client: LucidaClient | None = None):
     from fastapi import FastAPI, HTTPException
-    app = FastAPI(title="Lucida API", version="0.1.0")
     backend = client or LucidaClient()
     running: set[asyncio.Task] = set()
+    @asynccontextmanager
+    async def lifespan(_app):
+        yield
+        if running:
+            for task in running:
+                task.cancel()
+            await asyncio.gather(*running, return_exceptions=True)
+    app = FastAPI(title="Lucida API", version="0.1.0", lifespan=lifespan)
 
     @app.get("/v1/version")
     def version():
@@ -37,12 +45,6 @@ def create_app(client: LucidaClient | None = None):
         task.add_done_callback(running.discard)
         return {"accepted": True, "note": "Check /v1/jobs for result; submission is not completion"}
 
-    @app.on_event("shutdown")
-    async def shutdown():
-        if running:
-            for task in running:
-                task.cancel()
-            await asyncio.gather(*running, return_exceptions=True)
     return app
 
 

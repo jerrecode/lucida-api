@@ -69,3 +69,30 @@ def test_real_local_http_stream(tmp_path):
         finally:
             server.shutdown()
             thread.join()
+
+
+def test_failure_does_not_publish_mismatched_or_unexpected_media(tmp_path):
+    class BadServer(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", "5")
+            self.end_headers()
+            self.wfile.write(b"hello")
+        def log_message(self, *args): pass
+    class Server(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+    with Server(("127.0.0.1", 0), BadServer) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = LucidaClient(config(tmp_path, allowed_hosts=("127.0.0.1",), allow_private=True))
+            url = f"http://127.0.0.1:{server.server_address[1]}/bad"
+            from lucida_api import TransferError
+            with pytest.raises(TransferError, match="MIME"):
+                asyncio.run(client.acquire(url, "bad.wav"))
+            assert client.jobs()[0].state == JobState.FAILED
+            assert not (tmp_path / "music" / "bad.wav").exists()
+        finally:
+            server.shutdown()
+            thread.join()
