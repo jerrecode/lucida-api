@@ -1,0 +1,51 @@
+"""Optional loopback-only FastAPI service for status and controlled demo jobs."""
+from __future__ import annotations
+import asyncio
+import uuid
+from .client import LucidaClient
+
+
+def create_app(client: LucidaClient | None = None):
+    from fastapi import FastAPI, HTTPException
+    app = FastAPI(title="Lucida API", version="0.1.0")
+    backend = client or LucidaClient()
+    running: set[asyncio.Task] = set()
+
+    @app.get("/v1/version")
+    def version():
+        return backend.version()
+
+    @app.get("/v1/providers")
+    def providers():
+        return backend.providers()
+
+    @app.get("/v1/jobs")
+    def jobs(limit: int = 100):
+        if limit < 1 or limit > 1000:
+            raise HTTPException(400, "limit out of range")
+        return [j.to_dict() for j in backend.jobs(limit)]
+
+    @app.post("/v1/demo", status_code=202)
+    async def demo():
+        async def perform():
+            try:
+                await backend.acquire("sample://tone", filename=f"demo-{uuid.uuid4().hex[:12]}.wav")
+            except Exception:
+                pass  # persisted job contains the error; no hidden success response
+        task = asyncio.create_task(perform())
+        running.add(task)
+        task.add_done_callback(running.discard)
+        return {"accepted": True, "note": "Check /v1/jobs for result; submission is not completion"}
+
+    @app.on_event("shutdown")
+    async def shutdown():
+        if running:
+            for task in running:
+                task.cancel()
+            await asyncio.gather(*running, return_exceptions=True)
+    return app
+
+
+def main():
+    import uvicorn
+    uvicorn.run(create_app(), host="127.0.0.1", port=8765)
