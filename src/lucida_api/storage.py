@@ -13,9 +13,7 @@ class JobStore:
               id TEXT PRIMARY KEY, source TEXT NOT NULL, destination TEXT NOT NULL,
               state TEXT NOT NULL, transferred INTEGER NOT NULL DEFAULT 0,
               total INTEGER, error TEXT)""")
-            db.execute("UPDATE jobs SET state=?, error=? WHERE state IN (?, ?)",
-                       (JobState.INTERRUPTED, "Interrupted before completion; output not verified",
-                        JobState.RUNNING, JobState.QUEUED))
+
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path, timeout=15)
@@ -42,3 +40,15 @@ class JobStore:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM jobs ORDER BY rowid DESC LIMIT ?", (limit,)).fetchall()
         return [Job(*r) for r in rows]
+
+    def recover_interrupted(self) -> int:
+        """Mark incomplete jobs interrupted. ONLY call with all job owners stopped.
+
+        Another client or process may be actively processing shared journal rows.
+        Automatically running this on every connection would corrupt live state.
+        """
+        with self._connect() as db:
+            cursor = db.execute("UPDATE jobs SET state=?, error=? WHERE state IN (?, ?)",
+                (JobState.INTERRUPTED, "Interrupted before completion; output not verified",
+                 JobState.RUNNING, JobState.QUEUED))
+            return cursor.rowcount

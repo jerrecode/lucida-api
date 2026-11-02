@@ -41,6 +41,10 @@ def test_recover_interrupted(tmp_path):
     c = LucidaClient(config(tmp_path))
     c.store.add(Job("abc", "sample://tone", "output", JobState.RUNNING))
     c2 = LucidaClient(config(tmp_path))
+    assert c2.store.get("abc").state == JobState.RUNNING
+    with pytest.raises(ValueError):
+        c2.recover_interrupted()
+    assert c2.recover_interrupted(confirm_no_active_workers=True) == 1
     assert c2.store.get("abc").state == JobState.INTERRUPTED
 
 

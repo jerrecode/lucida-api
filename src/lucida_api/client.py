@@ -48,6 +48,12 @@ class LucidaClient:
     def providers(self) -> list[dict]:
         return [p.to_dict() for p in self.registry.capabilities()]
 
+    def recover_interrupted(self, *, confirm_no_active_workers: bool = False) -> int:
+        """Explicit recovery, dangerous if any CLI/GUI/service workers remain active."""
+        if not confirm_no_active_workers:
+            raise ValueError("Stop all Lucida applications first; then pass confirm_no_active_workers=True")
+        return self.store.recover_interrupted()
+
     def jobs(self, limit: int = 100) -> list[Job]:
         return self.store.list(limit)
 

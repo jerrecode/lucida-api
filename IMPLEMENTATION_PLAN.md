@@ -17,7 +17,8 @@
   - [x] Domain contracts, version and errors
   - [x] Capability registry, offline sample provider and MusicBrainz metadata-only search
   - [x] Configuration and app storage paths
-  - [x] SQLite journal and interrupted job recovery marker
+  - [x] SQLite journal and explicitly confirmed interrupted job recovery marker
+  - [ ] Automatic cross-process job leases and orphan detection
   - [x] Controlled HTTP test transfer with length and MIME verification
   - [ ] Durable transactional resume, migration tests, multi-process locking
   - [ ] Job cancellation/resume API and bounded batch scheduling

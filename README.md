@@ -6,7 +6,7 @@ Reusable Python 3.11+ backend for the coordinated [Lucida CLI](https://github.co
 
 - Typed async SDK with provider capability registry, strict URL host allowlisting, offline sample WAV provider and MusicBrainz recording metadata search (no audio from MusicBrainz).
 - Streaming HTTP(S) audio downloads from trusted, explicitly approved source domains. No redirects. MIME type and configured byte caps validated. HTTPS is required outside explicit local-test mode.
-- SQLite job journal with interrupted-job detection, state inspection, and no-overwrite publication through a same-filesystem hard link.
+- SQLite job journal with explicit orphaned-job recovery (`recover_interrupted`), state inspection, and no-overwrite publication through a same-filesystem hard link.
 - Config paths use XDG on Linux and LocalAppData on Windows. `LUCIDA_HOME` / `LUCIDA_OUTPUT_DIR` override for local tests.
 - Optional FastAPI `/v1/version`, `/v1/providers`, `/v1/jobs`, `/v1/demo` endpoints (`pip install '.[server]'`). Loopback 127.0.0.1 only.
 
@@ -39,3 +39,7 @@ Tests: `python -m pip install -e '.[dev]' && python -m pytest -q`. Local test us
 This preview does **not** yet connect to lucida.to, Qobuz, TIDAL, or other streaming providers. Streaming-provider search, album/playlist acquisition, secure URL-to-file redirects, true pause/resume, automatic conversion, rate limits, cross-process job locking, and real-provider metadata retrieval are not yet implemented. Partial `.part` files are retained after a failed transfer but are not automatically resumed. A local API `/v1/demo` response confirms scheduling only, not completion. The API is intended for user-authorized media only.
 
 See [the roadmap](IMPLEMENTATION_PLAN.md), [the capability matrix](docs/CAPABILITY_MATRIX.md) and [architecture decision](docs/ADR-0001.md).
+
+### Shared journal recovery safety
+
+Multiple clients can share the same SQLite journal. Opening another client **does not** automatically mark other clients' running jobs as interrupted. After confirming every CLI, GUI and service process has stopped, call `LucidaClient().recover_interrupted(confirm_no_active_workers=True)` or `lucida recover --confirm-inactive` in the CLI. This records interrupted state; it does not resume partial transfers or verify any completed media. An automatic lease-based cross-process recovery protocol is planned.
