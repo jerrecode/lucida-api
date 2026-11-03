@@ -2,8 +2,10 @@
 from __future__ import annotations
 import asyncio
 import math
+import hashlib
 import os
 import re
+import stat
 import time
 import struct
 import uuid
@@ -11,6 +13,8 @@ import wave
 from pathlib import Path
 from collections.abc import Callable
 import httpx
+from .checkpoint import read_checkpoint, write_checkpoint, manifest_path, strong_etag
+from .filesystem import publish_no_replace
 from .config import Config
 from .models import (API_VERSION, SCHEMA_VERSION, CapabilityUnavailable,
                      FileConflict, Job, JobState, TrackInfo, TransferError)
@@ -128,19 +132,24 @@ class LucidaClient:
         return job, provider
 
     async def acquire(self, source: str, filename: str | None = None,
-                      progress: ProgressCallback | None = None) -> Job:
-        """Acquire one source, waiting for the result; interruption is journaled."""
+                      progress: ProgressCallback | None = None,
+                      expected_sha256: str | None = None) -> Job:
+        """Acquire one source, optionally verifying SHA-256 before publication."""
+        self._check_hash(expected_sha256)
         job, provider = await self._prepare_job(source, filename)
-        return await self._run_job(job, provider, progress)
+        return await self._run_job(job, provider, progress, expected_sha256=expected_sha256)
 
     async def submit(self, source: str, filename: str | None = None,
-                     progress: ProgressCallback | None = None) -> str:
+                     progress: ProgressCallback | None = None,
+                     expected_sha256: str | None = None) -> str:
         """Start an in-process background job and return its persistent identifier.
 
         The owning event loop must remain alive. Jobs are not run after process exit.
         """
+        self._check_hash(expected_sha256)
         job, provider = await self._prepare_job(source, filename)
-        task = asyncio.create_task(self._run_job(job, provider, progress))
+        task = asyncio.create_task(self._run_job(job, provider, progress,
+                                                 expected_sha256=expected_sha256))
         self._active[job.id] = task
         def completed(finished: asyncio.Task[Job]) -> None:
             self._active.pop(job.id, None)
@@ -181,7 +190,8 @@ class LucidaClient:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def retry(self, job_id: str, progress: ProgressCallback | None = None) -> Job:
+    async def retry(self, job_id: str, progress: ProgressCallback | None = None,
+                    expected_sha256: str | None = None) -> Job:
         """Retry a terminal failed job from scratch, never claiming HTTP resume."""
         previous = await asyncio.to_thread(self.store.get, job_id)
         if previous is None:
@@ -191,10 +201,47 @@ class LucidaClient:
         original = Path(previous.destination)
         if original.parent.resolve() != self.config.output_dir.resolve():
             raise ValueError("Retry requires the original output directory")
-        return await self.acquire(previous.source, original.name, progress)
+        return await self.acquire(previous.source, original.name, progress,
+                                  expected_sha256=expected_sha256)
+
+    async def resume(self, job_id: str, progress: ProgressCallback | None = None,
+                     expected_sha256: str | None = None) -> Job:
+        """Resume an existing partial only when the server provides a strong ETag.
+
+        Requires RFC 9110 compliant Range and If-Range. A changed source fails
+        without modifying the previous partial; call retry() to start over.
+        """
+        self._check_hash(expected_sha256)
+        previous = await asyncio.to_thread(self.store.get, job_id)
+        if previous is None:
+            raise ValueError(f"Unknown job ID: {job_id}")
+        if previous.state not in (JobState.FAILED, JobState.CANCELLED, JobState.INTERRUPTED):
+            raise ValueError("Only failed, cancelled and interrupted jobs can resume")
+        provider = self.registry.resolve(previous.source)
+        if not isinstance(provider, DirectMediaProvider):
+            raise CapabilityUnavailable("Resuming this provider type is unsupported")
+        await check_source(previous.source, self.config.allowed_hosts, self.config.allow_private)
+        destination = Path(previous.destination)
+        if destination.parent.resolve() != self.config.output_dir.resolve():
+            raise ValueError("Resume requires the original output directory")
+        if destination.exists() or destination.is_symlink():
+            raise FileConflict(f"Destination already exists: {destination}")
+        part = destination.with_name(f".{destination.name}.{job_id}.part")
+        read_checkpoint(part, previous.source, self.config.max_bytes)
+        if not await asyncio.to_thread(self.store.requeue, job_id):
+            raise TransferError("Job was already claimed by another worker")
+        return await self._run_job(previous, provider, progress, resume=True,
+                                   expected_sha256=expected_sha256)
+
+    @staticmethod
+    def _check_hash(expected: str | None) -> None:
+        if expected is not None and re.fullmatch(r"[0-9a-fA-F]{64}", expected) is None:
+            raise ValueError("Expected SHA-256 must contain exactly 64 hexadecimal digits")
 
     async def _run_job(self, job: Job, provider: object,
-                       progress: ProgressCallback | None = None) -> Job:
+                       progress: ProgressCallback | None = None,
+                       resume: bool = False,
+                       expected_sha256: str | None = None) -> Job:
         dest = Path(job.destination)
         transferred = 0
         total = None
@@ -241,23 +288,65 @@ class LucidaClient:
                     total = transferred
                     report(JobState.RUNNING)
                 else:
+                    headers = {}
+                    if resume:
+                        transferred, etag, known_total = read_checkpoint(
+                            part, job.source, self.config.max_bytes)
+                        headers = {"Range": f"bytes={transferred}-", "If-Range": etag}
                     async with httpx.AsyncClient(timeout=self.config.timeout_seconds,
                                                  follow_redirects=False, trust_env=False) as http:
-                        async with http.stream("GET", job.source) as response:
-                            if response.status_code != 200:
-                                raise TransferError(f"HTTP {response.status_code}; redirects not followed")
+                        async with http.stream("GET", job.source, headers=headers) as response:
+                            if response.status_code != (206 if resume else 200):
+                                raise TransferError(
+                                    f"HTTP {response.status_code}; " +
+                                    ("safe resumption refused, retry from scratch" if resume else "redirects not followed"))
                             mime = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
                             if not (mime.startswith("audio/") or mime in ("application/ogg", "application/octet-stream")):
                                 raise TransferError(f"Refusing unexpected MIME type: {mime or 'unknown'}")
                             content_length = response.headers.get("content-length")
-                            if content_length:
+                            length = None
+                            if content_length is not None:
                                 try:
-                                    total = int(content_length)
+                                    length = int(content_length)
                                 except ValueError as exc:
                                     raise TransferError("Invalid content length") from exc
-                                if total < 0 or total > self.config.max_bytes:
+                                if length < 0 or length > self.config.max_bytes:
                                     raise TransferError("Remote file exceeds configured size limit")
-                            with part.open("xb") as file:
+                            if resume:
+                                # The server must honor both byte offset and original ETag.
+                                if response.headers.get("etag") != etag:
+                                    raise TransferError("Source ETag changed during resume")
+                                header = response.headers.get("content-range", "")
+                                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", header)
+                                if not match:
+                                    raise TransferError("Missing or invalid Content-Range")
+                                start, end, whole = map(int, match.groups())
+                                if start != transferred or end < start or whole != end + 1 or whole > self.config.max_bytes:
+                                    raise TransferError("Content-Range contradicts partial file")
+                                if known_total is not None and whole != known_total:
+                                    raise TransferError("Remote length changed since original transfer")
+                                if length is not None and length != end - start + 1:
+                                    raise TransferError("Content-Length contradicts Content-Range")
+                                total = whole
+                                flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                                fd = os.open(part, flags)
+                                try:
+                                    st = os.fstat(fd)
+                                    if not stat.S_ISREG(st.st_mode) or st.st_size != transferred:
+                                        raise TransferError("Partial file changed during resume")
+                                    file = os.fdopen(fd, "ab")
+                                    fd = -1
+                                finally:
+                                    if fd != -1:
+                                        os.close(fd)
+                            else:
+                                total = length
+                                fresh_etag = strong_etag(response.headers.get("etag"))
+                                if fresh_etag:
+                                    write_checkpoint(part, job.source, fresh_etag, total)
+                                file = part.open("xb")
+                            with file:
+                                report(JobState.RUNNING)
                                 async for chunk in response.aiter_bytes(chunk_size=262144):
                                     transferred += len(chunk)
                                     if transferred > self.config.max_bytes:
@@ -270,10 +359,29 @@ class LucidaClient:
                                 raise TransferError("Empty download is not a usable audio file")
                             if total is not None and total != transferred:
                                 raise TransferError("Truncated transfer; length mismatch")
+                # The checksum covers the actual bytes written, including any
+                # validated resumed prefix, not just the last HTTP response.
+                if expected_sha256 is not None:
+                    def digest() -> str:
+                        with part.open("rb") as src:
+                            return hashlib.file_digest(src, "sha256").hexdigest()
+                    actual = await asyncio.to_thread(digest)
+                    if actual.lower() != expected_sha256.lower():
+                        raise TransferError("SHA-256 mismatch; output not published")
                 # Publish only if absent, and only after full stream verification.
-                await asyncio.to_thread(os.link, part, dest)
-                await asyncio.to_thread(part.unlink)
-                return report(JobState.COMPLETED)
+                await asyncio.to_thread(publish_no_replace, part, dest)
+                completed = report(JobState.COMPLETED)
+                # Publication is complete. Cleanup errors must not mark a valid
+                # published file as failed or invite an unsafe duplicate retry.
+                try:
+                    part.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                try:
+                    manifest_path(part).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return completed
         except asyncio.CancelledError:
             try:
                 report(JobState.CANCELLED, "Cancelled by caller")

@@ -81,6 +81,16 @@ class JobStore:
             if result.rowcount != 1:
                 raise JobOwnershipError(f"Job ownership lost: {job_id}")
 
+    def requeue(self, job_id: str) -> bool:
+        """Atomically move a terminal job back to queued without touching active work."""
+        with self._connect() as db:
+            result = db.execute("""UPDATE jobs SET state=?, error=NULL
+                       WHERE id=? AND state IN (?, ?, ?)
+                       AND owner IS NULL""",
+                       (JobState.QUEUED, job_id, JobState.FAILED,
+                        JobState.CANCELLED, JobState.INTERRUPTED))
+            return result.rowcount == 1
+
     def set_queued_state(self, job_id: str, state: JobState, error: str) -> bool:
         """Mark an unclaimed job cancelled or failed without touching active work."""
         if state not in (JobState.CANCELLED, JobState.FAILED):
