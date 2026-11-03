@@ -1,6 +1,6 @@
 # Hierarchical implementation plan (2026-11-02)
 
-**Completion rule:** a parent checkbox is completed only if all mandatory descendants are verified. Repository status: development preview, NOT release ready. Code and tests in the first vertical slice are locally verified under Python 3.13; all twelve Ubuntu and Windows CI jobs passed, including Qt offscreen launch. Real desktop and installer testing remain pending.
+**Completion rule:** a parent checkbox is completed only if all mandatory descendants are verified. Repository status: development preview, NOT release ready. Code and tests in the first vertical slice are locally verified under Python 3.13; CI matrices on Ubuntu and Windows have passed all 12 jobs, including Qt offscreen GUI launch. Full interactive Windows desktop and installer testing remain pending.
 
 - [ ] Phase 1: Discovery and architecture [API; P0]
   - [x] Inspect all three initial repositories (empty via GitHub API)
@@ -12,8 +12,8 @@
   - [x] Establish three independent Python packages and declared dependency direction
   - [x] Add per-project tests and Linux/Windows GitHub Actions definitions
   - [x] Verify 2026-11-02 CI results on GitHub Windows and Ubuntu runners (12/12 jobs)
-  - [x] Verify all three wheel builds on Ubuntu and Windows CI runners
-  - [ ] Verify installers, updates and uninstallation in clean VMs
+  - [x] Verify all three wheel builds on both OS runners
+  - [ ] Verify installer scripts, update/uninstall and graphical sessions in clean VMs
 - [ ] Phase 3: API [API; P0]
   - [x] Domain contracts, version and errors
   - [x] Capability registry, offline sample provider and MusicBrainz metadata-only search
@@ -22,7 +22,8 @@
   - [ ] Automatic cross-process job leases and orphan detection
   - [x] Controlled HTTP test transfer with length and MIME verification
   - [ ] Durable transactional resume, migration tests, multi-process locking
-  - [ ] Job cancellation/resume API and bounded batch scheduling
+  - [x] In-process SDK background job submission, wait, cancellation, shutdown and new-job retry (verified locally 2026-11-03)
+  - [ ] Durable cross-process cancellation, automatic recovery, real byte-range resume
 - [ ] Phase 4: Real providers [API; P0]
   - [ ] Validate authorized provider interfaces, search and metadata
   - [ ] Implement and contract-test a real supported provider
@@ -35,11 +36,13 @@
   - [ ] Optional FFmpeg conversion + verification
 - [ ] Phase 6: CLI [CLI; P0]
   - [x] Version, doctor, providers, MusicBrainz search, offline demo, direct download, JSON jobs
-  - [ ] Batch queues, pause, cancel, retry and interactive TUI
+  - [x] Bounded CLI batch import and terminal-failure retry (local tests 2026-11-03)
+  - [ ] Persistent cross-process queues, pause, remote cancellation and interactive TUI
   - [ ] Linux and Windows real terminal validation
 - [ ] Phase 7: GUI [GUI; P0]
   - [x] Qt downloads interface, metadata search, test provider, asynchronous workers and journal view
-  - [ ] Provider search, artwork, retry, cancel, adaptive settings and model-view virtual queue
+  - [x] GUI current-worker cancellation button and periodic history refresh (code implemented; Qt CI pending)
+  - [ ] Provider search, artwork, retry, adaptive settings and model-view virtual queue
   - [ ] Test actual GUI on Linux and Windows screens / accessibility tooling
 - [ ] Phase 8: Installation [all; P0]
   - [x] Initial isolated Python venv installer scripts for Unix and PowerShell
@@ -59,4 +62,4 @@
 
 ## Continuation point
 
-Run the combined tests (`PYTHONPATH=lucida-api/src:lucida-cli/src:lucida-gui/src pytest -q lucida-api/tests lucida-cli/tests lucida-gui/tests`) from sibling checkout directories. Next required tasks: fix and harden filesystem finalization on non-hardlink volumes; implement job lifecycle controls; create verified authorized real-provider adapter; verify the GitHub Actions matrix on Windows and Ubuntu. Keep Windows verification separate from Linux results. Do not mark parent phases complete yet.
+Run the combined tests (`PYTHONPATH=lucida-api/src:lucida-cli/src:lucida-gui/src pytest -q lucida-api/tests lucida-cli/tests lucida-gui/tests`) from sibling checkout directories. Next required tasks: harden filesystem finalization on non-hardlink volumes; implement durable cross-process lifecycle controls; create verified authorized real-provider adapter; verify the GitHub Actions matrix on Windows and Ubuntu. Keep Windows verification separate from Linux results. Do not mark parent phases complete yet.

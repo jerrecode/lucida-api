@@ -41,6 +41,7 @@ class LucidaClient:
         self._search_lock = asyncio.Lock()
         self._last_search_at = 0.0
         self._limit = asyncio.Semaphore(self.config.max_concurrent)
+        self._active: dict[str, asyncio.Task[Job]] = {}
 
     def version(self) -> dict[str, str | int]:
         return {"api": API_VERSION, "schema": SCHEMA_VERSION}
@@ -106,30 +107,102 @@ class LucidaClient:
         except (ValueError, TypeError) as exc:
             raise TransferError("Unable to parse MusicBrainz metadata") from exc
 
-    async def acquire(self, source: str, filename: str | None = None,
-                      progress: ProgressCallback | None = None) -> Job:
+    async def _prepare_job(self, source: str, filename: str | None) -> tuple[Job, object]:
         provider = self.registry.resolve(source)
         if provider is None:
             raise CapabilityUnavailable("No verified acquisition provider for this source")
         if isinstance(provider, DirectMediaProvider):
             await check_source(source, self.config.allowed_hosts, self.config.allow_private)
-        dest = self.config.output_dir / safe_filename(filename or ("sample-tone.wav" if isinstance(provider, SampleProvider) else "download.audio"))
+        basename = safe_filename(filename or (
+            "sample-tone.wav" if isinstance(provider, SampleProvider) else "download.audio"))
+        dest = self.config.output_dir / basename
         if dest.exists() or dest.is_symlink():
             raise FileConflict(f"File already exists: {dest}")
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         job = Job(str(uuid.uuid4()), source, str(dest), JobState.QUEUED)
         await asyncio.to_thread(self.store.add, job)
+        return job, provider
+
+    async def acquire(self, source: str, filename: str | None = None,
+                      progress: ProgressCallback | None = None) -> Job:
+        """Acquire one source, waiting for the result; interruption is journaled."""
+        job, provider = await self._prepare_job(source, filename)
+        return await self._run_job(job, provider, progress)
+
+    async def submit(self, source: str, filename: str | None = None,
+                     progress: ProgressCallback | None = None) -> str:
+        """Start an in-process background job and return its persistent identifier.
+
+        The owning event loop must remain alive. Jobs are not run after process exit.
+        """
+        job, provider = await self._prepare_job(source, filename)
+        task = asyncio.create_task(self._run_job(job, provider, progress))
+        self._active[job.id] = task
+        def completed(finished: asyncio.Task[Job]) -> None:
+            self._active.pop(job.id, None)
+            if not finished.cancelled():
+                finished.exception()  # consume logged failure: journal retains details
+        task.add_done_callback(completed)
+        return job.id
+
+    async def wait(self, job_id: str) -> Job:
+        """Wait on a job started by this client; return its persisted final state."""
+        task = self._active.get(job_id)
+        if task is not None:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass  # the recorded job state is the result of interest
+        result = await asyncio.to_thread(self.store.get, job_id)
+        if result is None:
+            raise ValueError(f"Unknown job ID: {job_id}")
+        return result
+
+    async def cancel(self, job_id: str) -> bool:
+        """Cancel an in-process submitted job; never manipulate another process."""
+        task = self._active.get(job_id)
+        if task is None or task.done():
+            return False
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        return True
+
+    async def shutdown(self) -> None:
+        """Cancel and await all background jobs owned by this client."""
+        tasks = list(self._active.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def retry(self, job_id: str, progress: ProgressCallback | None = None) -> Job:
+        """Retry a terminal failed job from scratch, never claiming HTTP resume."""
+        previous = await asyncio.to_thread(self.store.get, job_id)
+        if previous is None:
+            raise ValueError(f"Unknown job ID: {job_id}")
+        if previous.state not in (JobState.FAILED, JobState.CANCELLED, JobState.INTERRUPTED):
+            raise ValueError("Only failed, cancelled and interrupted jobs can be retried")
+        original = Path(previous.destination)
+        if original.parent.resolve() != self.config.output_dir.resolve():
+            raise ValueError("Retry requires the original output directory")
+        return await self.acquire(previous.source, original.name, progress)
+
+    async def _run_job(self, job: Job, provider: object,
+                       progress: ProgressCallback | None = None) -> Job:
+        dest = Path(job.destination)
         transferred = 0
         total = None
         part = dest.with_name(f".{dest.name}.{job.id}.part")
         def report(state: JobState, error: str | None = None) -> Job:
-            updated = Job(job.id, source, str(dest), state, transferred, total, error)
+            updated = Job(job.id, job.source, str(dest), state, transferred, total, error)
             self.store.update(job.id, state, transferred, total, error)
             if progress:
                 progress(updated)
             return updated
-        async with self._limit:
-            try:
+        try:
+            async with self._limit:
                 report(JobState.RUNNING)
                 if isinstance(provider, SampleProvider):
                     def write_sample() -> int:
@@ -144,10 +217,9 @@ class LucidaClient:
                     total = transferred
                     report(JobState.RUNNING)
                 else:
-                    # Reuse a connection pool within the job; fail closed on redirects/HTML.
                     async with httpx.AsyncClient(timeout=self.config.timeout_seconds,
                                                  follow_redirects=False, trust_env=False) as http:
-                        async with http.stream("GET", source) as response:
+                        async with http.stream("GET", job.source) as response:
                             if response.status_code != 200:
                                 raise TransferError(f"HTTP {response.status_code}; redirects not followed")
                             mime = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
@@ -174,18 +246,15 @@ class LucidaClient:
                                 raise TransferError("Empty download is not a usable audio file")
                             if total is not None and total != transferred:
                                 raise TransferError("Truncated transfer; length mismatch")
-                # Hard-link publication creates destination only if absent: no silent overwrite.
+                # Publish only if absent, and only after full stream verification.
                 await asyncio.to_thread(os.link, part, dest)
                 await asyncio.to_thread(part.unlink)
                 return report(JobState.COMPLETED)
-            except asyncio.CancelledError:
-                report(JobState.CANCELLED, "Cancelled by caller")
-                raise
-            except Exception as exc:
-                report(JobState.FAILED, f"{type(exc).__name__}: {exc}")
-                if isinstance(exc, httpx.HTTPError):
-                    raise TransferError(f"Network transfer failed: {exc}") from exc
-                raise
-            finally:
-                # Failed partial files remain for inspection, never confused with completed outputs.
-                pass
+        except asyncio.CancelledError:
+            report(JobState.CANCELLED, "Cancelled by caller")
+            raise
+        except Exception as exc:
+            report(JobState.FAILED, f"{type(exc).__name__}: {exc}")
+            if isinstance(exc, httpx.HTTPError):
+                raise TransferError(f"Network transfer failed: {exc}") from exc
+            raise
