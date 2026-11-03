@@ -16,7 +16,7 @@ from .models import (API_VERSION, SCHEMA_VERSION, CapabilityUnavailable,
                      FileConflict, Job, JobState, TrackInfo, TransferError)
 from .providers import DirectMediaProvider, MusicBrainzProvider, ProviderRegistry, SampleProvider
 from .security import check_source
-from .storage import JobStore
+from .storage import JobStore, JobOwnershipError
 
 ProgressCallback = Callable[[Job], None]
 
@@ -34,6 +34,10 @@ class LucidaClient:
     def __init__(self, config: Config | None = None) -> None:
         self.config = config or Config()
         self.store = JobStore(self.config.state_dir / "jobs.sqlite3")
+        # Leases expire only after a worker fails to heartbeat for two minutes.
+        self.store.recover_expired()
+        self._owner = uuid.uuid4().hex
+        self._lease_seconds = 120.0
         self.registry = ProviderRegistry()
         self.registry.register(SampleProvider())
         self.registry.register(DirectMediaProvider())
@@ -195,14 +199,34 @@ class LucidaClient:
         transferred = 0
         total = None
         part = dest.with_name(f".{dest.name}.{job.id}.part")
+        claimed = False
+        heartbeat_task: asyncio.Task | None = None
         def report(state: JobState, error: str | None = None) -> Job:
             updated = Job(job.id, job.source, str(dest), state, transferred, total, error)
-            self.store.update(job.id, state, transferred, total, error)
+            if claimed:
+                self.store.update_owned(job.id, self._owner, state, transferred, total, error,
+                                        self._lease_seconds)
+            else:
+                self.store.set_queued_state(job.id, state, error or "Cancelled before start")
             if progress:
                 progress(updated)
             return updated
         try:
             async with self._limit:
+                if not await asyncio.to_thread(self.store.claim, job.id, self._owner,
+                                               self._lease_seconds):
+                    raise JobOwnershipError(f"Unable to claim queued job: {job.id}")
+                claimed = True
+                runner = asyncio.current_task()
+                async def maintain_lease():
+                    while True:
+                        await asyncio.sleep(20)
+                        if not await asyncio.to_thread(self.store.heartbeat, job.id,
+                                                       self._owner, self._lease_seconds):
+                            if runner is not None:
+                                runner.cancel()
+                            return
+                heartbeat_task = asyncio.create_task(maintain_lease())
                 report(JobState.RUNNING)
                 if isinstance(provider, SampleProvider):
                     def write_sample() -> int:
@@ -251,10 +275,20 @@ class LucidaClient:
                 await asyncio.to_thread(part.unlink)
                 return report(JobState.COMPLETED)
         except asyncio.CancelledError:
-            report(JobState.CANCELLED, "Cancelled by caller")
+            try:
+                report(JobState.CANCELLED, "Cancelled by caller")
+            except JobOwnershipError:
+                # Recovery may have reclaimed an expired job: never overwrite it.
+                pass
             raise
         except Exception as exc:
-            report(JobState.FAILED, f"{type(exc).__name__}: {exc}")
+            # If ownership was lost, avoid clobbering another worker's state.
+            if not isinstance(exc, JobOwnershipError):
+                report(JobState.FAILED, f"{type(exc).__name__}: {exc}")
             if isinstance(exc, httpx.HTTPError):
                 raise TransferError(f"Network transfer failed: {exc}") from exc
             raise
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)

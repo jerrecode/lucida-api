@@ -19,11 +19,13 @@
   - [x] Capability registry, offline sample provider and MusicBrainz metadata-only search
   - [x] Configuration and app storage paths
   - [x] SQLite journal and explicitly confirmed interrupted job recovery marker
-  - [ ] Automatic cross-process job leases and orphan detection
+  - [x] Transactional cross-process job ownership, heartbeat and stale-lease detection (verified 2026-11-03)
+  - [ ] Fully durable cross-process queue worker and automatic safe resume
   - [x] Controlled HTTP test transfer with length and MIME verification
-  - [ ] Durable transactional resume, migration tests, multi-process locking
+  - [x] Transactionally serialized v1-to-v2 SQLite schema migration and ownership collision tests
+  - [ ] Byte-range partial resume and end-to-end multiprocess crash/restart testing
   - [x] In-process SDK background job submission, wait, cancellation, shutdown and new-job retry (verified locally 2026-11-03)
-  - [ ] Durable cross-process cancellation, automatic recovery, real byte-range resume
+  - [ ] Cross-process cancellation dispatch, durable queue rescheduling and true byte-range resume
 - [ ] Phase 4: Real providers [API; P0]
   - [ ] Validate authorized provider interfaces, search and metadata
   - [ ] Implement and contract-test a real supported provider
@@ -62,4 +64,4 @@
 
 ## Continuation point
 
-Run the combined tests (`PYTHONPATH=lucida-api/src:lucida-cli/src:lucida-gui/src pytest -q lucida-api/tests lucida-cli/tests lucida-gui/tests`) from sibling checkout directories. Next required tasks: harden filesystem finalization on non-hardlink volumes; implement durable cross-process lifecycle controls; create verified authorized real-provider adapter; verify the GitHub Actions matrix on Windows and Ubuntu. Keep Windows verification separate from Linux results. Do not mark parent phases complete yet.
+Run the combined tests (`PYTHONPATH=lucida-api/src:lucida-cli/src:lucida-gui/src pytest -q lucida-api/tests lucida-cli/tests lucida-gui/tests`) from sibling checkout directories. Next required tasks: harden filesystem finalization on non-hardlink volumes; implement cross-process queue rescheduling and byte-range resume; create verified authorized real-provider adapter; verify the GitHub Actions matrix on Windows and Ubuntu. Keep Windows verification separate from Linux results. Do not mark parent phases complete yet.
